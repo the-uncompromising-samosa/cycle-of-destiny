@@ -29,9 +29,6 @@
             90% { opacity: 1; transform: translateY(0); }
             100% { opacity: 0; transform: translateY(-20px); }
         }
-        .modal-hidden {
-            display: none;
-        }
     </style>
 </head>
 <body class="bg-slate-900 text-white overflow-hidden h-screen">
@@ -54,22 +51,32 @@
         import { getFirestore, doc, getDoc, setDoc, onSnapshot, updateDoc, arrayUnion, runTransaction } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- GAME CONFIGURATION & CONSTANTS ---
-        const ZODIAC_SIGNS = {
-            Aries: 'Fire', Taurus: 'Earth', Gemini: 'Air', Cancer: 'Water',
-            Leo: 'Fire', Virgo: 'Earth', Libra: 'Air', Scorpio: 'Water',
-            Sagittarius: 'Fire', Capricorn: 'Earth', Aquarius: 'Air', Pisces: 'Water'
+        const ZODIAC_DATA = {
+            Aries:       { primary: 'Fire',  secondary: 'Air' },
+            Leo:         { primary: 'Fire',  secondary: 'Air' },
+            Sagittarius: { primary: 'Fire',  secondary: 'Air' },
+            Taurus:      { primary: 'Earth', secondary: 'Water' },
+            Virgo:       { primary: 'Earth', secondary: 'Water' },
+            Capricorn:   { primary: 'Earth', secondary: 'Water' },
+            Gemini:      { primary: 'Air',   secondary: 'Fire' },
+            Libra:       { primary: 'Air',   secondary: 'Fire' },
+            Aquarius:    { primary: 'Air',   secondary: 'Fire' },
+            Cancer:      { primary: 'Water', secondary: 'Earth' },
+            Scorpio:     { primary: 'Water', secondary: 'Earth' },
+            Pisces:      { primary: 'Water', secondary: 'Earth' },
         };
         const ELEMENTS = ['Fire', 'Water', 'Earth', 'Air', 'Ether'];
+        const MISSION_TYPES = ['Power', 'Deception', 'Alliance', 'Knowledge', 'Fortune', 'Chaos', 'Glory'];
         const INITIAL_KISMET_COINS = 1000;
         const WEEKLY_ANTE = 100;
         const GAME_PHASES = {
             LOBBY: 'Lobby',
             DEALING: 'Dealing',
             CHALLENGE_1: 'Challenge 1: Prophecy or Reveal',
-            REVEAL_1: 'First Reveal (2 Cards)',
+            REVEAL_1: 'First Reveal (2 Edicts)',
             CHALLENGE_2: 'Challenge 2: The Zodiac Swap',
-            REVEAL_2: 'Second Reveal (2 Cards)',
-            REVEAL_3: 'Final Reveal (1 Card)',
+            REVEAL_2: 'Second Reveal (2 Edicts)',
+            REVEAL_3: 'Final Reveal (1 Edict)',
             SHOWDOWN: 'Showdown',
             ELIMINATION: 'Elimination',
             GAME_OVER: 'Game Over'
@@ -90,14 +97,14 @@
         async function initializeFirebase() {
             try {
                 // --- PASTE YOUR FIREBASE CONFIGURATION OBJECT HERE ---
-               const firebaseConfig = {
-  apiKey: "AIzaSyD2w4Yk3APwVHvnAyzl1OWfMf23oWOn6Zc",
-  authDomain: "destiny-game-db.firebaseapp.com",
-  projectId: "destiny-game-db",
-  storageBucket: "destiny-game-db.firebasestorage.app",
-  messagingSenderId: "981815270967",
-  appId: "1:981815270967:web:c10129cb03f2d39ae069b2"
-};
+                const firebaseConfig = {
+                  apiKey: "AIzaSyD2w4Yk3APwVHvnAyzl1OWfMf23oWOn6Zc",
+                  authDomain: "destiny-game-db.firebaseapp.com",
+                  projectId: "destiny-game-db",
+                  storageBucket: "destiny-game-db.firebasestorage.app",
+                  messagingSenderId: "981815270967",
+                  appId: "1:981815270967:web:c10129cb03f2d39ae069b2"
+                };
                 // ---------------------------------------------------
                 
                 if (!firebaseConfig.apiKey) {
@@ -157,6 +164,10 @@
             unsubscribeGameListener = onSnapshot(gameDocRef, (doc) => {
                 if(doc.exists()){
                     gameState = doc.data();
+                    // Recalculate scores anytime state changes
+                    if (gameState.phase !== GAME_PHASES.LOBBY) {
+                        gameState.players = calculateAllPlayerScores(gameState.players, gameState.communityCards);
+                    }
                     render();
                 } else {
                     renderError("The game session has ended.");
@@ -172,7 +183,7 @@
             const newGameDocRef = doc(db, 'destiny-games', newGameId);
             const hostPlayer = {
                 id: userId, name: localPlayerName, isHost: true, kismetCoins: INITIAL_KISMET_COINS,
-                zodiacSign: null, elementalCard: null, score: 0, isEliminated: false, revealedInfo: []
+                zodiacSign: null, score: 0, isEliminated: false, revealedInfo: {}
             };
             await setDoc(newGameDocRef, {
                 gameId: newGameId, players: [hostPlayer], phase: GAME_PHASES.LOBBY,
@@ -191,7 +202,7 @@
             if (gameState.players.length >= 12) { showToast("This game is full.", 'error'); return; }
             const newPlayer = {
                 id: userId, name: localPlayerName, isHost: false, kismetCoins: INITIAL_KISMET_COINS,
-                zodiacSign: null, elementalCard: null, score: 0, isEliminated: false, revealedInfo: []
+                zodiacSign: null, score: 0, isEliminated: false, revealedInfo: {}
             };
             await updateDoc(gameDocRef, { players: arrayUnion(newPlayer), log: arrayUnion(`${localPlayerName} has joined the game.`) });
         }
@@ -203,19 +214,16 @@
                 if (!sfDoc.exists()) throw "Document does not exist!";
                 let currentPlayers = sfDoc.data().players;
                 let assignedZodiacs = [];
-                let deck = generateDeck();
                 const updatedPlayers = currentPlayers.map(p => {
                     let randomZodiac;
-                    do { randomZodiac = Object.keys(ZODIAC_SIGNS)[Math.floor(Math.random() * Object.keys(ZODIAC_SIGNS).length)]; } while (assignedZodiacs.includes(randomZodiac));
+                    do { randomZodiac = Object.keys(ZODIAC_DATA)[Math.floor(Math.random() * Object.keys(ZODIAC_DATA).length)]; } while (assignedZodiacs.includes(randomZodiac));
                     assignedZodiacs.push(randomZodiac);
-                    const cardIndex = Math.floor(Math.random() * deck.length);
-                    const dealtCard = deck.splice(cardIndex, 1)[0];
                     const kismetCoins = isRestart ? INITIAL_KISMET_COINS : p.kismetCoins;
-                    return { ...p, zodiacSign: randomZodiac, elementalCard: dealtCard, kismetCoins: kismetCoins - WEEKLY_ANTE, score: 0, isEliminated: false, revealedInfo: [] };
+                    return { ...p, zodiacSign: randomZodiac, kismetCoins: kismetCoins - WEEKLY_ANTE, score: 0, isEliminated: false, revealedInfo: {} };
                 });
                 transaction.update(gameDocRef, {
                     players: updatedPlayers, phase: GAME_PHASES.DEALING,
-                    log: [isRestart ? "A new game begins!" : "The game has started!", "Ante paid. Cards have been dealt."],
+                    log: [isRestart ? "A new game begins!" : "The game has started!", "Ante paid. Destiny Cards dealt."],
                     pot: updatedPlayers.length * WEEKLY_ANTE, communityCards: [], challengeWinnerId: null, prophecy: null
                 });
             });
@@ -248,16 +256,19 @@
                         logMessage = `${logMessage} ${winnerName} has won the challenge!`;
                     }
                 } else if (newPhase.startsWith('Reveal')) {
-                    const deck = generateDeck();
+                    const deck = generateEdictDeck();
                     let newCards = [];
                     const revealCount = newPhase === GAME_PHASES.REVEAL_3 ? 1 : 2;
 
                     if (newPhase === GAME_PHASES.REVEAL_1 && gameState.prophecy) {
                         const prophecyElement = gameState.prophecy;
-                        const prophecyCard = deck.find(c => c.element === prophecyElement);
+                        let prophecyCard = deck.find(c => c.element === prophecyElement);
                         if(prophecyCard) {
                             newCards.push(prophecyCard);
                             deck.splice(deck.indexOf(prophecyCard), 1);
+                        } else { // Failsafe if element not in deck
+                            const cardIndex = Math.floor(Math.random() * deck.length);
+                            newCards.push(deck.splice(cardIndex, 1)[0]);
                         }
                         updates.prophecy = null; // Consume prophecy
                     }
@@ -267,7 +278,7 @@
                         newCards.push(deck.splice(cardIndex, 1)[0]);
                     }
                     updates.communityCards = arrayUnion(...newCards);
-                    logMessage = `${revealCount} new card(s) revealed!`;
+                    logMessage = `${revealCount} new Edict(s) revealed!`;
                 }
 
                 updates.log = arrayUnion(logMessage);
@@ -280,30 +291,32 @@
         
         async function handleChallenge1Choice(type, selection) {
             closeModal();
+            let updates = { challengeWinnerId: null };
+            let logMessage = '';
+
             if (type === 'prophecy') {
-                await updateDoc(gameDocRef, {
-                    log: arrayUnion(`${gameState.players.find(p=>p.id === userId).name} has chosen Prophecy, influencing the next reveal!`),
-                    challengeWinnerId: null,
-                    prophecy: selection
-                });
+                updates.prophecy = selection;
+                logMessage = `${gameState.players.find(p=>p.id === userId).name} has chosen Prophecy, influencing the next reveal!`;
             } else if (type === 'reveal') {
                 const targetPlayer = gameState.players.find(p => p.id === selection);
-                const info = { type: 'zodiac', playerId: targetPlayer.id, value: targetPlayer.zodiacSign };
+                const primaryElement = ZODIAC_DATA[targetPlayer.zodiacSign].primary;
                 
                 await runTransaction(db, async (transaction) => {
                     const sfDoc = await transaction.get(gameDocRef);
                     if (!sfDoc.exists()) throw "Document does not exist!";
                     const players = sfDoc.data().players;
                     const winner = players.find(p => p.id === userId);
-                    winner.revealedInfo.push(info);
-                    transaction.update(gameDocRef, { players });
+                    if (winner) {
+                        winner.revealedInfo[targetPlayer.id] = primaryElement;
+                    }
+                    transaction.update(gameDocRef, { players: players });
                 });
-
-                await updateDoc(gameDocRef, {
-                    log: arrayUnion(`${gameState.players.find(p=>p.id === userId).name} has chosen Reveal, gaining secret knowledge!`),
-                    challengeWinnerId: null
-                });
+                
+                logMessage = `${gameState.players.find(p=>p.id === userId).name} has chosen Reveal, learning ${targetPlayer.name}'s Primary Element!`;
             }
+
+            updates.log = arrayUnion(logMessage);
+            await updateDoc(gameDocRef, updates);
             await progressToNextPhase();
         }
 
@@ -318,7 +331,7 @@
                 const winnerZodiac = winner.zodiacSign;
                 winner.zodiacSign = target.zodiacSign;
                 target.zodiacSign = winnerZodiac;
-                transaction.update(gameDocRef, { players, challengeWinnerId: null, log: arrayUnion(`${winner.name} swapped Zodiac signs with ${target.name}!`) });
+                transaction.update(gameDocRef, { players, challengeWinnerId: null, log: arrayUnion(`${winner.name} swapped Destiny Cards with ${target.name}!`) });
             });
             await progressToNextPhase();
         }
@@ -327,27 +340,20 @@
             await runTransaction(db, async (transaction) => {
                 const sfDoc = await transaction.get(gameDocRef);
                 if (!sfDoc.exists()) throw "Document does not exist!";
-                const { players, communityCards, pot } = sfDoc.data();
-                const scoredPlayers = players.map(p => {
-                    if (p.isEliminated) return { ...p, score: -1 };
-                    let score = 0;
-                    const playerZodiacElement = ZODIAC_SIGNS[p.zodiacSign];
-                    communityCards.forEach(card => {
-                        if (card.element === playerZodiacElement) score += 15;
-                        if (card.element === p.elementalCard.element) score += 10;
-                    });
-                    score += p.elementalCard.value;
-                    return { ...p, score };
-                });
-                const rankedPlayers = scoredPlayers.filter(p => !p.isEliminated).sort((a, b) => b.score - a.score);
+                const { pot } = sfDoc.data();
+                const players = calculateAllPlayerScores(sfDoc.data().players, sfDoc.data().communityCards);
+                const rankedPlayers = players.filter(p => !p.isEliminated).sort((a, b) => b.score - a.score);
+                
                 const firstPrize = Math.floor(pot * 0.5);
                 const secondPrize = Math.floor(pot * 0.3);
                 const thirdPrize = pot - firstPrize - secondPrize;
                 let logMessages = ["Showdown Results:"];
-                if (rankedPlayers.length > 0) { const p = scoredPlayers.find(pl => pl.id === rankedPlayers[0].id); p.kismetCoins += firstPrize; logMessages.push(`1st: ${p.name} wins ${firstPrize} KC!`); }
-                if (rankedPlayers.length > 1) { const p = scoredPlayers.find(pl => pl.id === rankedPlayers[1].id); p.kismetCoins += secondPrize; logMessages.push(`2nd: ${p.name} wins ${secondPrize} KC!`); }
-                if (rankedPlayers.length > 2) { const p = scoredPlayers.find(pl => pl.id === rankedPlayers[2].id); p.kismetCoins += thirdPrize; logMessages.push(`3rd: ${p.name} wins ${thirdPrize} KC!`); }
-                transaction.update(gameDocRef, { players: scoredPlayers, log: arrayUnion(...logMessages) });
+
+                if (rankedPlayers.length > 0) { const p = players.find(pl => pl.id === rankedPlayers[0].id); p.kismetCoins += firstPrize; logMessages.push(`1st: ${p.name} wins ${firstPrize} KC!`); }
+                if (rankedPlayers.length > 1) { const p = players.find(pl => pl.id === rankedPlayers[1].id); p.kismetCoins += secondPrize; logMessages.push(`2nd: ${p.name} wins ${secondPrize} KC!`); }
+                if (rankedPlayers.length > 2) { const p = players.find(pl => pl.id === rankedPlayers[2].id); p.kismetCoins += thirdPrize; logMessages.push(`3rd: ${p.name} wins ${thirdPrize} KC!`); }
+                
+                transaction.update(gameDocRef, { players, log: arrayUnion(...logMessages) });
             });
         }
 
@@ -366,11 +372,38 @@
         }
 
         // --- Helper & UI Functions ---
-        function generateDeck() {
+        function generateEdictDeck() {
             const deck = [];
-            ELEMENTS.forEach(element => { for (let i = 1; i <= 10; i++) deck.push({ element, value: i }); });
+            for (let i = 0; i < 50; i++) {
+                deck.push({
+                    element: ELEMENTS[Math.floor(Math.random() * ELEMENTS.length)],
+                    mission: MISSION_TYPES[Math.floor(Math.random() * MISSION_TYPES.length)],
+                    value: Math.floor(Math.random() * 16) + 5 // 5 to 20
+                });
+            }
             return deck;
         }
+
+        function calculatePlayerScore(player, communityCards) {
+            if (!player.zodiacSign) return 0;
+            const zodiacInfo = ZODIAC_DATA[player.zodiacSign];
+            let score = 0;
+            communityCards.forEach(card => {
+                if (card.element === 'Ether') {
+                    score += card.value; // 100% for Aether
+                } else if (card.element === zodiacInfo.primary) {
+                    score += card.value; // 100% for Primary
+                } else if (card.element === zodiacInfo.secondary) {
+                    score += Math.round(card.value * 0.5); // 50% for Secondary
+                }
+            });
+            return score;
+        }
+
+        function calculateAllPlayerScores(players, communityCards) {
+            return players.map(p => ({ ...p, score: calculatePlayerScore(p, communityCards) }));
+        }
+
         function getElementGradient(element) { return ({ Fire: 'fire-gradient', Water: 'water-gradient', Earth: 'earth-gradient', Air: 'air-gradient', Ether: 'ether-gradient' })[element] || 'bg-slate-700'; }
         function getZodiacSVG(sign) { return `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-12 h-12">${({ Aries: `<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75l3 3m0 0l3-3m-3 3v-7.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />`, Taurus: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />`, Gemini: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z" />`, Cancer: `<path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM12.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM18.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />`, Leo: `<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />`, Virgo: `<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12c0-5.25-4.25-9.5-9.5-9.5S.5 6.75.5 12s4.25 9.5 9.5 9.5 9.5-4.25 9.5-9.5z" />`, Libra: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m-6-9h12" />`, Scorpio: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" />`, Sagittarius: `<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 19.5l15-15m0 0H8.25m11.25 0v11.25" />`, Capricorn: `<path stroke-linecap="round" stroke-linejoin="round" d="M11.25 4.5l7.5 7.5-7.5 7.5" />`, Aquarius: `<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />`, Pisces: `<path stroke-linecap="round" stroke-linejoin="round" d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />`}[sign] || '')}</svg>`; }
         function showToast(message, type = 'info') {
@@ -382,14 +415,7 @@
             setTimeout(() => toast.remove(), 5000);
         }
         function openModal(title, content) {
-            modalContainer.innerHTML = `
-                <div id="modal-backdrop" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-40">
-                    <div id="modal-content" class="bg-slate-800 rounded-2xl shadow-2xl p-6 w-full max-w-md">
-                        <h2 class="text-2xl font-bold mb-4 text-yellow-400">${title}</h2>
-                        <div>${content}</div>
-                    </div>
-                </div>
-            `;
+            modalContainer.innerHTML = `<div id="modal-backdrop" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-40"><div id="modal-content" class="bg-slate-800 rounded-2xl shadow-2xl p-6 w-full max-w-md"><h2 class="text-2xl font-bold mb-4 text-yellow-400">${title}</h2><div>${content}</div></div></div>`;
             document.getElementById('modal-backdrop').addEventListener('click', (e) => { if(e.target.id === 'modal-backdrop') closeModal(); });
         }
         function closeModal() { modalContainer.innerHTML = ''; }
@@ -397,13 +423,21 @@
         // --- Render Functions ---
         function render() {
             if (!auth.currentUser) { renderLoading(); return; }
-            if (!gameState || !gameState.players) { renderLobby(false); return; }
-            const playerInGame = gameState.players.find(p => p.id === userId);
-            if (gameId && playerInGame) {
-                if (gameState.phase === GAME_PHASES.LOBBY) renderLobby(true);
-                else renderGameScreen();
-            } else {
+            
+            // FIX: Check for gameState existence before trying to access its properties.
+            if (!gameState || !gameState.players) {
                 renderLobby(false);
+                return;
+            }
+
+            const playerInGame = gameState.players.find(p => p.id === userId);
+
+            if (!playerInGame) {
+                renderLobby(false);
+            } else if (gameState.phase === GAME_PHASES.LOBBY) {
+                renderLobby(true);
+            } else {
+                renderGameScreen();
             }
         }
 
@@ -444,15 +478,15 @@
                 <div class="flex flex-col md:flex-row h-screen">
                     <div class="w-full md:w-1/4 bg-slate-900/80 backdrop-blur-sm p-4 space-y-3 overflow-y-auto border-r border-slate-700">
                         <h2 class="text-xl font-bold text-center mb-2">Players</h2>
-                        ${gameState.players.sort((a,b) => b.kismetCoins - a.kismetCoins).map(p => renderPlayerCard(p, me)).join('')}
+                        ${gameState.players.sort((a,b) => b.score - a.score).map(p => renderPlayerCard(p, me)).join('')}
                     </div>
                     <div class="flex-1 flex flex-col p-4 md:p-6 lg:p-8 overflow-y-auto">
                         <header class="flex justify-between items-center mb-4">
                             <h1 class="text-3xl font-bold text-yellow-400">Cycle of Destiny</h1>
                             <div class="text-right"><p class="text-lg">Pot: <span class="font-bold text-green-400">${gameState.pot} KC</span></p><p class="text-sm text-slate-400">${gameState.phase}</p></div>
                         </header>
-                        <div class="flex-1 flex flex-col items-center justify-center bg-slate-800/30 rounded-2xl p-6 mb-4 border border-slate-700"><h3 class="text-xl font-semibold mb-4">Community Cards</h3><div class="flex flex-wrap justify-center gap-4 h-48">${renderCommunityCards()}</div></div>
-                        <div class="flex-1 flex flex-col items-center justify-center bg-slate-800/30 rounded-2xl p-6 mb-4 border border-slate-700"><h3 class="text-xl font-semibold mb-4">My Hand</h3><div class="flex justify-center gap-4 h-48">${renderMyHand(me)}</div></div>
+                        <div class="flex-1 flex flex-col items-center justify-center bg-slate-800/30 rounded-2xl p-6 mb-4 border border-slate-700"><h3 class="text-xl font-semibold mb-4">Elemental Edicts</h3><div class="flex flex-wrap justify-center gap-4">${renderCommunityCards()}</div></div>
+                        <div class="flex-1 flex flex-col items-center justify-center bg-slate-800/30 rounded-2xl p-6 mb-4 border border-slate-700"><h3 class="text-xl font-semibold mb-4">My Hand & Score: ${me.score}</h3><div class="flex flex-wrap justify-center items-start gap-4">${renderMyHand(me)}</div></div>
                         <div class="flex flex-col md:flex-row gap-4 h-48">
                             <div class="flex-1 bg-slate-800/30 rounded-2xl p-4 border border-slate-700"><h3 class="text-lg font-semibold mb-2">Action Required</h3><div id="action-panel" class="h-full flex items-center justify-center text-slate-400">${renderActionPanel(me)}</div></div>
                             <div class="flex-1 bg-black/30 rounded-2xl p-4 border border-slate-700 overflow-y-auto flex flex-col-reverse"><ul id="log-panel" class="space-y-1 text-sm">${gameState.log.slice(-10).reverse().map(msg => `<li><span class="text-slate-500">></span> ${msg}</li>`).join('')}</ul></div>
@@ -464,14 +498,16 @@
 
         function renderPlayerCard(player, me) {
             const isMe = player.id === me.id;
-            const zodiacElement = ZODIAC_SIGNS[player.zodiacSign];
-            const showScore = gameState.phase === GAME_PHASES.SHOWDOWN || gameState.phase === GAME_PHASES.ELIMINATION || gameState.phase === GAME_PHASES.GAME_OVER;
-            const revealedZodiac = me.revealedInfo.find(info => info.type === 'zodiac' && info.playerId === player.id)?.value;
+            const zodiacInfo = ZODIAC_DATA[player.zodiacSign];
+            const revealedElement = me.revealedInfo[player.id];
             return `<div class="p-3 rounded-lg ${isMe ? 'bg-indigo-900/50' : 'bg-slate-800'} border ${player.isEliminated ? 'border-red-500/50 opacity-50' : 'border-slate-700'}">
-                <div class="flex justify-between items-center"><span class="font-bold truncate ${isMe ? 'text-yellow-300' : ''}">${player.name} ${player.isHost ? '(Host)' : ''}</span><span class="font-semibold text-green-400">${player.kismetCoins} KC</span></div>
+                <div class="flex justify-between items-center">
+                    <span class="font-bold truncate ${isMe ? 'text-yellow-300' : ''}">${player.name} ${player.isHost ? '(Host)' : ''}</span>
+                    <span class="font-bold text-xl text-yellow-400">${player.score} pts</span>
+                </div>
                 ${player.zodiacSign ? `<div class="flex items-center justify-around mt-2 text-xs text-slate-300">
-                    <div class="text-center"><p>Zodiac</p><p class="font-bold">${isMe || revealedZodiac ? player.zodiacSign : '????'} (${zodiacElement})</p></div>
-                    ${showScore ? `<div class="text-center"><p>Score</p><p class="font-bold text-xl text-yellow-400">${player.score}</p></div>` : ''}
+                    <div class="text-center"><p>Destiny Card</p><p class="font-bold">${isMe ? player.zodiacSign : '???'}</p></div>
+                    <div class="text-center"><p>Primary Element</p><p class="font-bold">${isMe || revealedElement ? zodiacInfo.primary : '???'}</p></div>
                 </div>` : ''}
                 ${player.isEliminated ? `<p class="text-center text-red-500 font-bold mt-1">ELIMINATED</p>` : ''}
             </div>`;
@@ -482,27 +518,58 @@
             for(let i = 0; i < 5; i++) {
                 const card = gameState.communityCards[i];
                 if (card) {
-                    cardsHTML += `<div class="w-24 h-36 p-2 rounded-lg shadow-lg flex flex-col justify-between items-center text-white ${getElementGradient(card.element)}">
-                        <span class="font-bold text-xl self-start">${card.value}</span><span class="font-semibold">${card.element}</span><span class="font-bold text-xl self-end">${card.value}</span>
+                    cardsHTML += `<div class="w-28 h-40 p-2 rounded-lg shadow-lg flex flex-col justify-between items-center text-white ${getElementGradient(card.element)}">
+                        <span class="font-bold text-2xl self-start">${card.value}</span>
+                        <div class="text-center">
+                            <span class="font-semibold text-lg">${card.element}</span>
+                            <span class="text-xs block">${card.mission}</span>
+                        </div>
+                        <span class="font-bold text-2xl self-end">${card.value}</span>
                     </div>`;
                 } else {
-                     cardsHTML += `<div class="w-24 h-36 rounded-lg celestial-gradient border-2 border-dashed border-slate-600"></div>`;
+                     cardsHTML += `<div class="w-28 h-40 rounded-lg celestial-gradient border-2 border-dashed border-slate-600"></div>`;
                 }
             }
             return cardsHTML;
         }
 
         function renderMyHand(me) {
-            if (!me || !me.zodiacSign || !me.elementalCard) return '<p>Waiting for game to start...</p>';
-            const zodiacElement = ZODIAC_SIGNS[me.zodiacSign];
-            const elementalCard = me.elementalCard;
+            if (!me || !me.zodiacSign) return '<p>Waiting for game to start...</p>';
+            const zodiacInfo = ZODIAC_DATA[me.zodiacSign];
+            let claimedCardsHTML = '';
+
+            gameState.communityCards.forEach(card => {
+                let points = 0;
+                let claimType = '';
+                if (card.element === 'Ether') {
+                    points = card.value;
+                    claimType = 'Aether Claim';
+                } else if (card.element === zodiacInfo.primary) {
+                    points = card.value;
+                    claimType = 'Primary Claim';
+                } else if (card.element === zodiacInfo.secondary) {
+                    points = Math.round(card.value * 0.5);
+                    claimType = 'Secondary Claim';
+                }
+
+                if (points > 0) {
+                    claimedCardsHTML += `<div class="w-24 h-36 p-2 rounded-lg shadow-lg flex flex-col justify-between items-center text-white ${getElementGradient(card.element)} relative">
+                        <span class="font-bold text-xl self-start">${card.value}</span>
+                        <div class="text-center"><span class="font-semibold">${card.element}</span><span class="text-xs block">${card.mission}</span></div>
+                        <span class="font-bold text-xl self-end">${card.value}</span>
+                        <div class="absolute -bottom-2 bg-green-500 text-white text-xs font-bold px-2 py-0.5 rounded-full">+${points} pts</div>
+                    </div>`;
+                }
+            });
+
             return `
                 <div class="w-32 h-44 p-3 rounded-xl shadow-lg flex flex-col justify-between items-center text-white bg-slate-700 border-2 border-yellow-400">
-                    <span class="text-xs self-start">ZODIAC</span><div class="text-center">${getZodiacSVG(me.zodiacSign)}<p class="font-bold">${me.zodiacSign}</p><p class="text-sm text-slate-300">${zodiacElement}</p></div><span class="text-xs self-end">ZODIAC</span>
+                    <span class="text-xs self-start">DESTINY</span>
+                    <div class="text-center">${getZodiacSVG(me.zodiacSign)}<p class="font-bold">${me.zodiacSign}</p><p class="text-sm text-slate-300">${zodiacInfo.primary} / ${zodiacInfo.secondary}</p></div>
+                    <span class="text-xs self-end">DESTINY</span>
                 </div>
-                <div class="w-32 h-44 p-3 rounded-xl shadow-lg flex flex-col justify-between items-center text-white ${getElementGradient(elementalCard.element)} border-2 border-cyan-400">
-                    <span class="font-bold text-3xl self-start">${elementalCard.value}</span><span class="font-semibold text-lg">${elementalCard.element}</span><span class="font-bold text-3xl self-end">${elementalCard.value}</span>
-                </div>`;
+                <div class="flex flex-wrap justify-center items-start gap-2">${claimedCardsHTML}</div>
+            `;
         }
 
         function handleActionClick(dataset) {
@@ -538,7 +605,7 @@
                     </div>`;
                 }
                 if (gameState.phase === GAME_PHASES.CHALLENGE_2) {
-                    const content = `<div class="text-center w-full"><p class="text-lg text-yellow-300 mb-2">You won! Swap your Zodiac card.</p><div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2 overflow-y-auto max-h-24">${gameState.players.filter(p => p.id !== userId && !p.isEliminated).map(p => `<button class="action-btn bg-slate-600 hover:bg-slate-500 p-2 rounded-lg" data-action="challenge2" data-value="${p.id}">${p.name}</button>`).join('')}</div></div>`;
+                    const content = `<div class="text-center w-full"><p class="text-lg text-yellow-300 mb-2">You won! Swap Destiny Cards.</p><div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2 overflow-y-auto max-h-24">${gameState.players.filter(p => p.id !== userId && !p.isEliminated).map(p => `<button class="action-btn bg-slate-600 hover:bg-slate-500 p-2 rounded-lg" data-action="challenge2" data-value="${p.id}">${p.name}</button>`).join('')}</div></div>`;
                     return content;
                 }
             }
@@ -568,4 +635,5 @@
     </script>
 </body>
 </html>
+
 
