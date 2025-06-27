@@ -29,6 +29,9 @@
             90% { opacity: 1; transform: translateY(0); }
             100% { opacity: 0; transform: translateY(-20px); }
         }
+        .modal-hidden {
+            display: none;
+        }
     </style>
 </head>
 <body class="bg-slate-900 text-white overflow-hidden h-screen">
@@ -37,6 +40,9 @@
     <div id="app" class="flex flex-col h-full">
         <!-- Game Content will be rendered here by JavaScript -->
     </div>
+
+    <!-- Modal Container -->
+    <div id="modal-container"></div>
 
     <!-- Toast Notification Container -->
     <div id="toast-container" class="fixed bottom-5 right-5 z-50 space-y-2"></div>
@@ -59,11 +65,11 @@
         const GAME_PHASES = {
             LOBBY: 'Lobby',
             DEALING: 'Dealing',
-            CHALLENGE_1: 'Challenge 1: The Oracle\'s Choice',
-            REVEAL_1: 'First Reveal',
+            CHALLENGE_1: 'Challenge 1: Prophecy or Reveal',
+            REVEAL_1: 'First Reveal (2 Cards)',
             CHALLENGE_2: 'Challenge 2: The Zodiac Swap',
-            REVEAL_2: 'Second Reveal',
-            REVEAL_3: 'Final Reveal',
+            REVEAL_2: 'Second Reveal (2 Cards)',
+            REVEAL_3: 'Final Reveal (1 Card)',
             SHOWDOWN: 'Showdown',
             ELIMINATION: 'Elimination',
             GAME_OVER: 'Game Over'
@@ -71,6 +77,7 @@
 
         // --- DOM Elements ---
         const app = document.getElementById('app');
+        const modalContainer = document.getElementById('modal-container');
         const toastContainer = document.getElementById('toast-container');
 
         // --- Firebase State ---
@@ -83,9 +90,7 @@
         async function initializeFirebase() {
             try {
                 // --- PASTE YOUR FIREBASE CONFIGURATION OBJECT HERE ---
-                // This object is obtained from your Firebase project settings.
-                // It is required for the game to connect to the database.
-                const firebaseConfig = {
+               const firebaseConfig = {
   apiKey: "AIzaSyD2w4Yk3APwVHvnAyzl1OWfMf23oWOn6Zc",
   authDomain: "destiny-game-db.firebaseapp.com",
   projectId: "destiny-game-db",
@@ -96,7 +101,6 @@
                 // ---------------------------------------------------
                 
                 if (!firebaseConfig.apiKey) {
-                    console.error("Firebase config is missing.");
                     renderError("Game service is currently unavailable. Please follow the hosting guide to configure your Firebase database.");
                     return;
                 }
@@ -108,7 +112,6 @@
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
                         userId = user.uid;
-                        console.log("Authenticated User ID:", userId);
                         await setupGame();
                     } else {
                         await signInAnonymously(auth);
@@ -139,8 +142,6 @@
                 renderError("Please enter a valid Game ID.");
                 return;
              }
-             // NOTE: The path for Firestore documents is hardcoded here.
-             // You might need to adjust this if you change your database structure.
              gameDocRef = doc(db, 'destiny-games', gameId);
              const gameDocSnap = await getDoc(gameDocRef);
              if (gameDocSnap.exists()) {
@@ -156,7 +157,6 @@
             unsubscribeGameListener = onSnapshot(gameDocRef, (doc) => {
                 if(doc.exists()){
                     gameState = doc.data();
-                    console.log("Game state updated:", gameState);
                     render();
                 } else {
                     renderError("The game session has ended.");
@@ -167,189 +167,143 @@
         
         // --- Game Actions (Interacting with Firestore) ---
         async function createGame() {
-            if (!localPlayerName) {
-                showToast("Please enter your name.", 'error');
-                return;
-            }
+            if (!localPlayerName) { showToast("Please enter your name.", 'error'); return; }
             const newGameId = crypto.randomUUID().split('-')[0];
             const newGameDocRef = doc(db, 'destiny-games', newGameId);
             const hostPlayer = {
-                id: userId,
-                name: localPlayerName,
-                isHost: true,
-                kismetCoins: INITIAL_KISMET_COINS,
-                zodiacSign: null,
-                elementalCard: null,
-                score: 0,
-                isEliminated: false,
+                id: userId, name: localPlayerName, isHost: true, kismetCoins: INITIAL_KISMET_COINS,
+                zodiacSign: null, elementalCard: null, score: 0, isEliminated: false, revealedInfo: []
             };
-
             await setDoc(newGameDocRef, {
-                gameId: newGameId,
-                players: [hostPlayer],
-                phase: GAME_PHASES.LOBBY,
+                gameId: newGameId, players: [hostPlayer], phase: GAME_PHASES.LOBBY,
                 log: [`Game created by ${localPlayerName}. Waiting for players...`],
-                communityCards: [],
-                pot: 0,
-                challengeWinnerId: null,
+                communityCards: [], pot: 0, challengeWinnerId: null, prophecy: null
             });
-
             gameId = newGameId;
             gameDocRef = newGameDocRef;
             attachGameListener();
         }
 
         async function joinGame() {
-            if (!localPlayerName) {
-                showToast("Please enter your name.", 'error');
-                return;
-            }
-             if (gameState.phase !== GAME_PHASES.LOBBY) {
-                showToast("This game has already started.", 'error');
-                return;
-            }
-            if (gameState.players.find(p => p.id === userId)) {
-                showToast("You are already in the game.", 'info');
-                return;
-            }
-             if (gameState.players.length >= 12) {
-                showToast("This game is full.", 'error');
-                return;
-            }
-
+            if (!localPlayerName) { showToast("Please enter your name.", 'error'); return; }
+            if (gameState.phase !== GAME_PHASES.LOBBY) { showToast("This game has already started.", 'error'); return; }
+            if (gameState.players.find(p => p.id === userId)) { showToast("You are already in the game.", 'info'); return; }
+            if (gameState.players.length >= 12) { showToast("This game is full.", 'error'); return; }
             const newPlayer = {
-                id: userId,
-                name: localPlayerName,
-                isHost: false,
-                kismetCoins: INITIAL_KISMET_COINS,
-                zodiacSign: null,
-                elementalCard: null,
-                score: 0,
-                isEliminated: false,
+                id: userId, name: localPlayerName, isHost: false, kismetCoins: INITIAL_KISMET_COINS,
+                zodiacSign: null, elementalCard: null, score: 0, isEliminated: false, revealedInfo: []
             };
-
-            await updateDoc(gameDocRef, {
-                players: arrayUnion(newPlayer),
-                log: arrayUnion(`${localPlayerName} has joined the game.`)
-            });
+            await updateDoc(gameDocRef, { players: arrayUnion(newPlayer), log: arrayUnion(`${localPlayerName} has joined the game.`) });
         }
 
         async function startGame(isRestart = false) {
-            if (gameState.players.length < 2 && !isRestart) {
-                showToast("You need at least 2 players to start.", 'error');
-                return;
-            }
-            
+            if (gameState.players.length < 2 && !isRestart) { showToast("You need at least 2 players to start.", 'error'); return; }
             await runTransaction(db, async (transaction) => {
                 const sfDoc = await transaction.get(gameDocRef);
                 if (!sfDoc.exists()) throw "Document does not exist!";
-
                 let currentPlayers = sfDoc.data().players;
                 let assignedZodiacs = [];
                 let deck = generateDeck();
-                
                 const updatedPlayers = currentPlayers.map(p => {
                     let randomZodiac;
-                    do {
-                        randomZodiac = Object.keys(ZODIAC_SIGNS)[Math.floor(Math.random() * Object.keys(ZODIAC_SIGNS).length)];
-                    } while (assignedZodiacs.includes(randomZodiac));
+                    do { randomZodiac = Object.keys(ZODIAC_SIGNS)[Math.floor(Math.random() * Object.keys(ZODIAC_SIGNS).length)]; } while (assignedZodiacs.includes(randomZodiac));
                     assignedZodiacs.push(randomZodiac);
-
                     const cardIndex = Math.floor(Math.random() * deck.length);
                     const dealtCard = deck.splice(cardIndex, 1)[0];
-
                     const kismetCoins = isRestart ? INITIAL_KISMET_COINS : p.kismetCoins;
-
-                    return {
-                        ...p,
-                        zodiacSign: randomZodiac,
-                        elementalCard: dealtCard,
-                        kismetCoins: kismetCoins - WEEKLY_ANTE,
-                        score: 0,
-                        isEliminated: false, // Reset elimination status on restart
-                    };
+                    return { ...p, zodiacSign: randomZodiac, elementalCard: dealtCard, kismetCoins: kismetCoins - WEEKLY_ANTE, score: 0, isEliminated: false, revealedInfo: [] };
                 });
-                
                 transaction.update(gameDocRef, {
-                    players: updatedPlayers,
-                    phase: GAME_PHASES.DEALING,
+                    players: updatedPlayers, phase: GAME_PHASES.DEALING,
                     log: [isRestart ? "A new game begins!" : "The game has started!", "Ante paid. Cards have been dealt."],
-                    pot: updatedPlayers.length * WEEKLY_ANTE,
-                    communityCards: [],
-                    challengeWinnerId: null,
+                    pot: updatedPlayers.length * WEEKLY_ANTE, communityCards: [], challengeWinnerId: null, prophecy: null
                 });
             });
         }
 
         async function progressToNextPhase() {
             let newPhase = '';
-            let logMessage = '';
-            let winnerId = null;
-
             switch (gameState.phase) {
-                case GAME_PHASES.DEALING:
-                    newPhase = GAME_PHASES.CHALLENGE_1;
-                    break;
-                case GAME_PHASES.CHALLENGE_1:
-                    newPhase = GAME_PHASES.REVEAL_1;
-                    break;
-                case GAME_PHASES.REVEAL_1:
-                    newPhase = GAME_PHASES.CHALLENGE_2;
-                    break;
-                case GAME_PHASES.CHALLENGE_2:
-                    newPhase = GAME_PHASES.REVEAL_2;
-                    break;
-                case GAME_PHASES.REVEAL_2:
-                    newPhase = GAME_PHASES.REVEAL_3;
-                    break;
-                case GAME_PHASES.REVEAL_3:
-                    newPhase = GAME_PHASES.SHOWDOWN;
-                    break;
-                case GAME_PHASES.SHOWDOWN:
-                    newPhase = GAME_PHASES.ELIMINATION;
-                    break;
-                case GAME_PHASES.ELIMINATION:
-                    newPhase = GAME_PHASES.GAME_OVER;
-                    break;
+                case GAME_PHASES.DEALING: newPhase = GAME_PHASES.CHALLENGE_1; break;
+                case GAME_PHASES.CHALLENGE_1: newPhase = GAME_PHASES.REVEAL_1; break;
+                case GAME_PHASES.REVEAL_1: newPhase = GAME_PHASES.CHALLENGE_2; break;
+                case GAME_PHASES.CHALLENGE_2: newPhase = GAME_PHASES.REVEAL_2; break;
+                case GAME_PHASES.REVEAL_2: newPhase = GAME_PHASES.REVEAL_3; break;
+                case GAME_PHASES.REVEAL_3: newPhase = GAME_PHASES.SHOWDOWN; break;
+                case GAME_PHASES.SHOWDOWN: newPhase = GAME_PHASES.ELIMINATION; break;
+                case GAME_PHASES.ELIMINATION: newPhase = GAME_PHASES.GAME_OVER; break;
             }
 
             if (newPhase) {
                 const updates = { phase: newPhase };
+                let logMessage = `Now entering phase: ${newPhase}`;
                 
                 if (newPhase.startsWith('Challenge')) {
                     logMessage = `${newPhase} begins! A winner will be chosen by fate...`;
                     const activePlayers = gameState.players.filter(p => !p.isEliminated);
                     if (activePlayers.length > 0) {
-                        winnerId = activePlayers[Math.floor(Math.random() * activePlayers.length)].id;
+                        const winnerId = activePlayers[Math.floor(Math.random() * activePlayers.length)].id;
                         updates.challengeWinnerId = winnerId;
                         const winnerName = activePlayers.find(p => p.id === winnerId).name;
                         logMessage = `${logMessage} ${winnerName} has won the challenge!`;
                     }
                 } else if (newPhase.startsWith('Reveal')) {
-                    logMessage = `The ${newPhase.toLowerCase()}!`;
                     const deck = generateDeck();
-                    const randomCard = deck[Math.floor(Math.random() * deck.length)];
-                    updates.communityCards = arrayUnion(randomCard);
-                } else {
-                    logMessage = `Now entering phase: ${newPhase}`;
+                    let newCards = [];
+                    const revealCount = newPhase === GAME_PHASES.REVEAL_3 ? 1 : 2;
+
+                    if (newPhase === GAME_PHASES.REVEAL_1 && gameState.prophecy) {
+                        const prophecyElement = gameState.prophecy;
+                        const prophecyCard = deck.find(c => c.element === prophecyElement);
+                        if(prophecyCard) {
+                            newCards.push(prophecyCard);
+                            deck.splice(deck.indexOf(prophecyCard), 1);
+                        }
+                        updates.prophecy = null; // Consume prophecy
+                    }
+
+                    for (let i = newCards.length; i < revealCount; i++) {
+                        const cardIndex = Math.floor(Math.random() * deck.length);
+                        newCards.push(deck.splice(cardIndex, 1)[0]);
+                    }
+                    updates.communityCards = arrayUnion(...newCards);
+                    logMessage = `${revealCount} new card(s) revealed!`;
                 }
 
                 updates.log = arrayUnion(logMessage);
                 await updateDoc(gameDocRef, updates);
 
-                if (newPhase === GAME_PHASES.SHOWDOWN) {
-                    await calculateAndApplyShowdown();
-                } else if (newPhase === GAME_PHASES.ELIMINATION) {
-                     await handleElimination();
-                }
+                if (newPhase === GAME_PHASES.SHOWDOWN) await calculateAndApplyShowdown();
+                else if (newPhase === GAME_PHASES.ELIMINATION) await handleElimination();
             }
         }
         
-        async function handleChallenge1Choice() {
-            await updateDoc(gameDocRef, {
-                log: arrayUnion(`${gameState.players.find(p => p.id === userId).name} has used their advantage.`),
-                challengeWinnerId: null
-            });
+        async function handleChallenge1Choice(type, selection) {
+            closeModal();
+            if (type === 'prophecy') {
+                await updateDoc(gameDocRef, {
+                    log: arrayUnion(`${gameState.players.find(p=>p.id === userId).name} has chosen Prophecy, influencing the next reveal!`),
+                    challengeWinnerId: null,
+                    prophecy: selection
+                });
+            } else if (type === 'reveal') {
+                const targetPlayer = gameState.players.find(p => p.id === selection);
+                const info = { type: 'zodiac', playerId: targetPlayer.id, value: targetPlayer.zodiacSign };
+                
+                await runTransaction(db, async (transaction) => {
+                    const sfDoc = await transaction.get(gameDocRef);
+                    if (!sfDoc.exists()) throw "Document does not exist!";
+                    const players = sfDoc.data().players;
+                    const winner = players.find(p => p.id === userId);
+                    winner.revealedInfo.push(info);
+                    transaction.update(gameDocRef, { players });
+                });
+
+                await updateDoc(gameDocRef, {
+                    log: arrayUnion(`${gameState.players.find(p=>p.id === userId).name} has chosen Reveal, gaining secret knowledge!`),
+                    challengeWinnerId: null
+                });
+            }
             await progressToNextPhase();
         }
 
@@ -357,22 +311,14 @@
              await runTransaction(db, async (transaction) => {
                 const sfDoc = await transaction.get(gameDocRef);
                 if (!sfDoc.exists()) throw "Document does not exist!";
-
                 const players = sfDoc.data().players;
                 const winner = players.find(p => p.id === userId);
                 const target = players.find(p => p.id === targetPlayerId);
-                
                 if (!winner || !target) throw "Player not found";
-
                 const winnerZodiac = winner.zodiacSign;
                 winner.zodiacSign = target.zodiacSign;
                 target.zodiacSign = winnerZodiac;
-                
-                transaction.update(gameDocRef, { 
-                    players,
-                    log: arrayUnion(`${winner.name} swapped Zodiac signs with ${target.name}!`),
-                    challengeWinnerId: null
-                });
+                transaction.update(gameDocRef, { players, challengeWinnerId: null, log: arrayUnion(`${winner.name} swapped Zodiac signs with ${target.name}!`) });
             });
             await progressToNextPhase();
         }
@@ -381,17 +327,11 @@
             await runTransaction(db, async (transaction) => {
                 const sfDoc = await transaction.get(gameDocRef);
                 if (!sfDoc.exists()) throw "Document does not exist!";
-                
-                const currentGameState = sfDoc.data();
-                const players = currentGameState.players;
-                const communityCards = currentGameState.communityCards;
-                const pot = currentGameState.pot;
-
+                const { players, communityCards, pot } = sfDoc.data();
                 const scoredPlayers = players.map(p => {
                     if (p.isEliminated) return { ...p, score: -1 };
                     let score = 0;
                     const playerZodiacElement = ZODIAC_SIGNS[p.zodiacSign];
-                    
                     communityCards.forEach(card => {
                         if (card.element === playerZodiacElement) score += 15;
                         if (card.element === p.elementalCard.element) score += 10;
@@ -399,35 +339,15 @@
                     score += p.elementalCard.value;
                     return { ...p, score };
                 });
-
                 const rankedPlayers = scoredPlayers.filter(p => !p.isEliminated).sort((a, b) => b.score - a.score);
-                
                 const firstPrize = Math.floor(pot * 0.5);
                 const secondPrize = Math.floor(pot * 0.3);
                 const thirdPrize = pot - firstPrize - secondPrize;
-                
                 let logMessages = ["Showdown Results:"];
-
-                if (rankedPlayers.length > 0) {
-                    const p = scoredPlayers.find(player => player.id === rankedPlayers[0].id);
-                    p.kismetCoins += firstPrize;
-                    logMessages.push(`1st: ${p.name} wins ${firstPrize} KC!`);
-                }
-                if (rankedPlayers.length > 1) {
-                    const p = scoredPlayers.find(player => player.id === rankedPlayers[1].id);
-                    p.kismetCoins += secondPrize;
-                    logMessages.push(`2nd: ${p.name} wins ${secondPrize} KC!`);
-                }
-                if (rankedPlayers.length > 2) {
-                    const p = scoredPlayers.find(player => player.id === rankedPlayers[2].id);
-                    p.kismetCoins += thirdPrize;
-                    logMessages.push(`3rd: ${p.name} wins ${thirdPrize} KC!`);
-                }
-
-                transaction.update(gameDocRef, {
-                    players: scoredPlayers,
-                    log: arrayUnion(...logMessages)
-                });
+                if (rankedPlayers.length > 0) { const p = scoredPlayers.find(pl => pl.id === rankedPlayers[0].id); p.kismetCoins += firstPrize; logMessages.push(`1st: ${p.name} wins ${firstPrize} KC!`); }
+                if (rankedPlayers.length > 1) { const p = scoredPlayers.find(pl => pl.id === rankedPlayers[1].id); p.kismetCoins += secondPrize; logMessages.push(`2nd: ${p.name} wins ${secondPrize} KC!`); }
+                if (rankedPlayers.length > 2) { const p = scoredPlayers.find(pl => pl.id === rankedPlayers[2].id); p.kismetCoins += thirdPrize; logMessages.push(`3rd: ${p.name} wins ${thirdPrize} KC!`); }
+                transaction.update(gameDocRef, { players: scoredPlayers, log: arrayUnion(...logMessages) });
             });
         }
 
@@ -435,43 +355,24 @@
              await runTransaction(db, async (transaction) => {
                 const sfDoc = await transaction.get(gameDocRef);
                 if (!sfDoc.exists()) throw "Document does not exist!";
-                
                 let players = sfDoc.data().players;
                 const activePlayers = players.filter(p => !p.isEliminated);
-                
-                if (activePlayers.length <= 1) {
-                    transaction.update(gameDocRef, { log: arrayUnion("Not enough players for elimination.") });
-                    return;
-                }
-
+                if (activePlayers.length <= 1) { transaction.update(gameDocRef, { log: arrayUnion("Not enough players for elimination.") }); return; }
                 activePlayers.sort((a, b) => a.score - b.score);
                 const eliminatedPlayer = activePlayers[0];
                 const finalPlayers = players.map(p => p.id === eliminatedPlayer.id ? { ...p, isEliminated: true } : p);
-
-                transaction.update(gameDocRef, {
-                    players: finalPlayers,
-                    log: arrayUnion(`With the lowest score, ${eliminatedPlayer.name} has been eliminated from the game!`)
-                });
+                transaction.update(gameDocRef, { players: finalPlayers, log: arrayUnion(`With the lowest score, ${eliminatedPlayer.name} has been eliminated!`) });
              });
         }
 
-        // --- Helper Functions ---
+        // --- Helper & UI Functions ---
         function generateDeck() {
             const deck = [];
             ELEMENTS.forEach(element => { for (let i = 1; i <= 10; i++) deck.push({ element, value: i }); });
             return deck;
         }
-
-        function getElementGradient(element) {
-            const gradients = { Fire: 'fire-gradient', Water: 'water-gradient', Earth: 'earth-gradient', Air: 'air-gradient', Ether: 'ether-gradient' };
-            return gradients[element] || 'bg-slate-700';
-        }
-        
-        function getZodiacSVG(sign) {
-            const svgs = { Aries: `<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75l3 3m0 0l3-3m-3 3v-7.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />`, Taurus: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />`, Gemini: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z" />`, Cancer: `<path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM12.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM18.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />`, Leo: `<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />`, Virgo: `<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12c0-5.25-4.25-9.5-9.5-9.5S.5 6.75.5 12s4.25 9.5 9.5 9.5 9.5-4.25 9.5-9.5z" />`, Libra: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m-6-9h12" />`, Scorpio: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" />`, Sagittarius: `<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 19.5l15-15m0 0H8.25m11.25 0v11.25" />`, Capricorn: `<path stroke-linecap="round" stroke-linejoin="round" d="M11.25 4.5l7.5 7.5-7.5 7.5" />`, Aquarius: `<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />`, Pisces: `<path stroke-linecap="round" stroke-linejoin="round" d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />`};
-            return `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-12 h-12">${svgs[sign] || ''}</svg>`;
-        }
-
+        function getElementGradient(element) { return ({ Fire: 'fire-gradient', Water: 'water-gradient', Earth: 'earth-gradient', Air: 'air-gradient', Ether: 'ether-gradient' })[element] || 'bg-slate-700'; }
+        function getZodiacSVG(sign) { return `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-12 h-12">${({ Aries: `<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75l3 3m0 0l3-3m-3 3v-7.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />`, Taurus: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />`, Gemini: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 6.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 12.75a.75.75 0 110-1.5.75.75 0 010 1.5zM12 18.75a.75.75 0 110-1.5.75.75 0 010 1.5z" />`, Cancer: `<path stroke-linecap="round" stroke-linejoin="round" d="M6.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM12.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0zM18.75 12a.75.75 0 11-1.5 0 .75.75 0 011.5 0z" />`, Leo: `<path stroke-linecap="round" stroke-linejoin="round" d="M15.75 6a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0zM4.501 20.118a7.5 7.5 0 0114.998 0A17.933 17.933 0 0112 21.75c-2.676 0-5.216-.584-7.499-1.632z" />`, Virgo: `<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 12c0-5.25-4.25-9.5-9.5-9.5S.5 6.75.5 12s4.25 9.5 9.5 9.5 9.5-4.25 9.5-9.5z" />`, Libra: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 3v18m-6-9h12" />`, Scorpio: `<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126z" />`, Sagittarius: `<path stroke-linecap="round" stroke-linejoin="round" d="M4.5 19.5l15-15m0 0H8.25m11.25 0v11.25" />`, Capricorn: `<path stroke-linecap="round" stroke-linejoin="round" d="M11.25 4.5l7.5 7.5-7.5 7.5" />`, Aquarius: `<path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />`, Pisces: `<path stroke-linecap="round" stroke-linejoin="round" d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />`}[sign] || '')}</svg>`; }
         function showToast(message, type = 'info') {
             const colors = { info: 'bg-blue-500', success: 'bg-green-500', error: 'bg-red-500' };
             const toast = document.createElement('div');
@@ -480,40 +381,34 @@
             toastContainer.appendChild(toast);
             setTimeout(() => toast.remove(), 5000);
         }
+        function openModal(title, content) {
+            modalContainer.innerHTML = `
+                <div id="modal-backdrop" class="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-40">
+                    <div id="modal-content" class="bg-slate-800 rounded-2xl shadow-2xl p-6 w-full max-w-md">
+                        <h2 class="text-2xl font-bold mb-4 text-yellow-400">${title}</h2>
+                        <div>${content}</div>
+                    </div>
+                </div>
+            `;
+            document.getElementById('modal-backdrop').addEventListener('click', (e) => { if(e.target.id === 'modal-backdrop') closeModal(); });
+        }
+        function closeModal() { modalContainer.innerHTML = ''; }
 
         // --- Render Functions ---
         function render() {
             if (!auth.currentUser) { renderLoading(); return; }
-            if (!gameState || !gameState.players) {
-                renderLobby(false);
-                return;
-            }
+            if (!gameState || !gameState.players) { renderLobby(false); return; }
             const playerInGame = gameState.players.find(p => p.id === userId);
             if (gameId && playerInGame) {
-                if (gameState.phase === GAME_PHASES.LOBBY) {
-                    renderLobby(true);
-                } else {
-                    renderGameScreen();
-                }
+                if (gameState.phase === GAME_PHASES.LOBBY) renderLobby(true);
+                else renderGameScreen();
             } else {
                 renderLobby(false);
             }
         }
 
-        function renderError(message) {
-            app.innerHTML = `<div class="w-full h-full flex flex-col items-center justify-center text-center p-4">
-                <h1 class="text-3xl font-bold text-red-500 mb-4">An Error Occurred</h1>
-                <p class="text-slate-300 mb-6">${message}</p>
-                <button onclick="window.location.href=window.location.origin + window.location.pathname" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg">Go to Home</button>
-            </div>`;
-        }
-
-        function renderLoading() {
-            app.innerHTML = `<div class="w-full h-full flex items-center justify-center">
-                <svg class="animate-spin h-10 w-10 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                <span class="ml-3 text-xl">Connecting to the Cosmos...</span>
-            </div>`;
-        }
+        function renderError(message) { app.innerHTML = `<div class="w-full h-full flex flex-col items-center justify-center text-center p-4"><h1 class="text-3xl font-bold text-red-500 mb-4">An Error Occurred</h1><p class="text-slate-300 mb-6">${message}</p><button onclick="window.location.href=window.location.origin + window.location.pathname" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg">Go to Home</button></div>`; }
+        function renderLoading() { app.innerHTML = `<div class="w-full h-full flex items-center justify-center"><svg class="animate-spin h-10 w-10 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg><span class="ml-3 text-xl">Connecting...</span></div>`; }
 
         function renderLobby(isPlayerInGame = false) {
             app.innerHTML = `
@@ -522,12 +417,11 @@
                     <p class="text-slate-300 mb-8">Your fate is dealt, but your destiny is in your hands.</p>
                     <div class="bg-slate-800/50 backdrop-blur-sm p-8 rounded-2xl shadow-2xl w-full max-w-md text-center">
                         <input id="name-input" type="text" placeholder="Enter your name" value="${localPlayerName}" class="w-full bg-slate-700 text-white p-3 rounded-lg mb-4 border border-slate-600 focus:ring-2 focus:ring-indigo-500 focus:outline-none">
-                        
                         ${isPlayerInGame ? `
                             <p class="text-green-400 mb-4">You are in the lobby! Waiting for host to start...</p>
                             <div class="my-4"><h3 class="text-lg font-semibold mb-2">Players:</h3><ul class="text-left space-y-1">${gameState.players.map(p => `<li class="flex items-center"><svg class="w-4 h-4 mr-2 text-green-400" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path></svg>${p.name} ${p.isHost ? '(Host)' : ''}</li>`).join('')}</ul></div>
                             <div class="mt-6 text-center"><p class="text-slate-400">Share this Game ID with friends:</p><div class="flex mt-2"><input readonly id="share-id-input" value="${gameId}" class="w-full bg-slate-900 text-slate-300 p-2 rounded-l-lg border border-slate-600"><button id="copy-id-btn" class="bg-slate-600 hover:bg-slate-500 text-white font-bold p-2 rounded-r-lg">Copy</button></div></div>
-                            ${gameState.players.find(p => p.id === userId)?.isHost ? `<button id="start-game-btn" class="mt-4 w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg transition-transform duration-200 hover:scale-105">Start Game</button>` : ''}` 
+                            ${gameState.players.find(p => p.id === userId)?.isHost ? `<button id="start-game-btn" class="mt-4 w-full bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-4 rounded-lg">Start Game</button>` : ''}` 
                         : `
                             <h2 class="text-2xl font-semibold mb-4">Join or Create a Game</h2>
                             <button id="create-game-btn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg mb-4">Create New Game</button>
@@ -537,57 +431,46 @@
                         `}
                     </div>
                 </div>`;
-
             document.getElementById('name-input').addEventListener('input', (e) => { localPlayerName = e.target.value; localStorage.setItem('playerName', localPlayerName); });
             document.getElementById('create-game-btn')?.addEventListener('click', createGame);
-            document.getElementById('join-game-btn')?.addEventListener('click', async () => {
-                const idToJoin = document.getElementById('join-id-input').value;
-                await findAndJoinGame(idToJoin);
-                await joinGame();
-            });
+            document.getElementById('join-game-btn')?.addEventListener('click', async () => { const idToJoin = document.getElementById('join-id-input').value; await findAndJoinGame(idToJoin); await joinGame(); });
             document.getElementById('start-game-btn')?.addEventListener('click', () => startGame(false));
             document.getElementById('copy-id-btn')?.addEventListener('click', () => { document.getElementById('share-id-input').select(); document.execCommand('copy'); showToast('Game ID copied!', 'success'); });
         }
 
         function renderGameScreen() {
             const me = gameState.players.find(p => p.id === userId);
-            const isHost = me?.isHost;
-            const isMyTurn = gameState.challengeWinnerId === userId;
-            const winner = gameState.players.find(p => p.id === gameState.challengeWinnerId);
-
             app.innerHTML = `
                 <div class="flex flex-col md:flex-row h-screen">
                     <div class="w-full md:w-1/4 bg-slate-900/80 backdrop-blur-sm p-4 space-y-3 overflow-y-auto border-r border-slate-700">
                         <h2 class="text-xl font-bold text-center mb-2">Players</h2>
-                        ${gameState.players.sort((a,b) => b.kismetCoins - a.kismetCoins).map(p => renderPlayerCard(p, p.id === userId)).join('')}
+                        ${gameState.players.sort((a,b) => b.kismetCoins - a.kismetCoins).map(p => renderPlayerCard(p, me)).join('')}
                     </div>
                     <div class="flex-1 flex flex-col p-4 md:p-6 lg:p-8 overflow-y-auto">
                         <header class="flex justify-between items-center mb-4">
                             <h1 class="text-3xl font-bold text-yellow-400">Cycle of Destiny</h1>
                             <div class="text-right"><p class="text-lg">Pot: <span class="font-bold text-green-400">${gameState.pot} KC</span></p><p class="text-sm text-slate-400">${gameState.phase}</p></div>
                         </header>
-                        <div class="flex-1 flex flex-col items-center justify-center bg-slate-800/30 rounded-2xl p-6 mb-4 border border-slate-700"><h3 class="text-xl font-semibold mb-4">Community Cards</h3><div class="flex space-x-4 h-48">${renderCommunityCards()}</div></div>
-                        <div class="flex-1 flex flex-col items-center justify-center bg-slate-800/30 rounded-2xl p-6 mb-4 border border-slate-700"><h3 class="text-xl font-semibold mb-4">My Hand</h3><div class="flex space-x-4 h-48">${renderMyHand(me)}</div></div>
+                        <div class="flex-1 flex flex-col items-center justify-center bg-slate-800/30 rounded-2xl p-6 mb-4 border border-slate-700"><h3 class="text-xl font-semibold mb-4">Community Cards</h3><div class="flex flex-wrap justify-center gap-4 h-48">${renderCommunityCards()}</div></div>
+                        <div class="flex-1 flex flex-col items-center justify-center bg-slate-800/30 rounded-2xl p-6 mb-4 border border-slate-700"><h3 class="text-xl font-semibold mb-4">My Hand</h3><div class="flex justify-center gap-4 h-48">${renderMyHand(me)}</div></div>
                         <div class="flex flex-col md:flex-row gap-4 h-48">
-                            <div class="flex-1 bg-slate-800/30 rounded-2xl p-4 border border-slate-700"><h3 class="text-lg font-semibold mb-2">Action Required</h3><div id="action-panel" class="h-full flex items-center justify-center text-slate-400">${renderActionPanel(isMyTurn, isHost, winner)}</div></div>
+                            <div class="flex-1 bg-slate-800/30 rounded-2xl p-4 border border-slate-700"><h3 class="text-lg font-semibold mb-2">Action Required</h3><div id="action-panel" class="h-full flex items-center justify-center text-slate-400">${renderActionPanel(me)}</div></div>
                             <div class="flex-1 bg-black/30 rounded-2xl p-4 border border-slate-700 overflow-y-auto flex flex-col-reverse"><ul id="log-panel" class="space-y-1 text-sm">${gameState.log.slice(-10).reverse().map(msg => `<li><span class="text-slate-500">></span> ${msg}</li>`).join('')}</ul></div>
                         </div>
                     </div>
                 </div>`;
-            
-            document.getElementById('progress-game-btn')?.addEventListener('click', progressToNextPhase);
-            document.getElementById('challenge1-choice-btn')?.addEventListener('click', () => handleChallenge1Choice());
-            document.querySelectorAll('.challenge2-choice-btn').forEach(btn => btn.addEventListener('click', (e) => handleChallenge2Choice(e.currentTarget.dataset.targetId)));
-            document.getElementById('play-again-btn')?.addEventListener('click', () => startGame(true));
+            document.querySelectorAll('.action-btn').forEach(btn => btn.addEventListener('click', (e) => handleActionClick(e.currentTarget.dataset)));
         }
 
-        function renderPlayerCard(player, isMe) {
+        function renderPlayerCard(player, me) {
+            const isMe = player.id === me.id;
             const zodiacElement = ZODIAC_SIGNS[player.zodiacSign];
             const showScore = gameState.phase === GAME_PHASES.SHOWDOWN || gameState.phase === GAME_PHASES.ELIMINATION || gameState.phase === GAME_PHASES.GAME_OVER;
+            const revealedZodiac = me.revealedInfo.find(info => info.type === 'zodiac' && info.playerId === player.id)?.value;
             return `<div class="p-3 rounded-lg ${isMe ? 'bg-indigo-900/50' : 'bg-slate-800'} border ${player.isEliminated ? 'border-red-500/50 opacity-50' : 'border-slate-700'}">
                 <div class="flex justify-between items-center"><span class="font-bold truncate ${isMe ? 'text-yellow-300' : ''}">${player.name} ${player.isHost ? '(Host)' : ''}</span><span class="font-semibold text-green-400">${player.kismetCoins} KC</span></div>
                 ${player.zodiacSign ? `<div class="flex items-center justify-around mt-2 text-xs text-slate-300">
-                    <div class="text-center"><p>Zodiac</p><p class="font-bold">${player.zodiacSign} (${zodiacElement})</p></div>
+                    <div class="text-center"><p>Zodiac</p><p class="font-bold">${isMe || revealedZodiac ? player.zodiacSign : '????'} (${zodiacElement})</p></div>
                     ${showScore ? `<div class="text-center"><p>Score</p><p class="font-bold text-xl text-yellow-400">${player.score}</p></div>` : ''}
                 </div>` : ''}
                 ${player.isEliminated ? `<p class="text-center text-red-500 font-bold mt-1">ELIMINATED</p>` : ''}
@@ -596,14 +479,14 @@
 
         function renderCommunityCards() {
             let cardsHTML = '';
-            for(let i = 0; i < 3; i++) {
+            for(let i = 0; i < 5; i++) {
                 const card = gameState.communityCards[i];
                 if (card) {
-                    cardsHTML += `<div class="w-32 h-44 p-3 rounded-xl shadow-lg flex flex-col justify-between items-center text-white ${getElementGradient(card.element)}">
-                        <span class="font-bold text-3xl self-start">${card.value}</span><span class="font-semibold text-lg">${card.element}</span><span class="font-bold text-3xl self-end">${card.value}</span>
+                    cardsHTML += `<div class="w-24 h-36 p-2 rounded-lg shadow-lg flex flex-col justify-between items-center text-white ${getElementGradient(card.element)}">
+                        <span class="font-bold text-xl self-start">${card.value}</span><span class="font-semibold">${card.element}</span><span class="font-bold text-xl self-end">${card.value}</span>
                     </div>`;
                 } else {
-                     cardsHTML += `<div class="w-32 h-44 rounded-xl celestial-gradient border-2 border-dashed border-slate-600"></div>`;
+                     cardsHTML += `<div class="w-24 h-36 rounded-lg celestial-gradient border-2 border-dashed border-slate-600"></div>`;
                 }
             }
             return cardsHTML;
@@ -615,44 +498,64 @@
             const elementalCard = me.elementalCard;
             return `
                 <div class="w-32 h-44 p-3 rounded-xl shadow-lg flex flex-col justify-between items-center text-white bg-slate-700 border-2 border-yellow-400">
-                    <span class="text-xs self-start">ZODIAC</span>
-                    <div class="text-center">${getZodiacSVG(me.zodiacSign)}<p class="font-bold">${me.zodiacSign}</p><p class="text-sm text-slate-300">${zodiacElement}</p></div>
-                    <span class="text-xs self-end">ZODIAC</span>
+                    <span class="text-xs self-start">ZODIAC</span><div class="text-center">${getZodiacSVG(me.zodiacSign)}<p class="font-bold">${me.zodiacSign}</p><p class="text-sm text-slate-300">${zodiacElement}</p></div><span class="text-xs self-end">ZODIAC</span>
                 </div>
                 <div class="w-32 h-44 p-3 rounded-xl shadow-lg flex flex-col justify-between items-center text-white ${getElementGradient(elementalCard.element)} border-2 border-cyan-400">
                     <span class="font-bold text-3xl self-start">${elementalCard.value}</span><span class="font-semibold text-lg">${elementalCard.element}</span><span class="font-bold text-3xl self-end">${elementalCard.value}</span>
                 </div>`;
         }
 
-        function renderActionPanel(isMyTurn, isHost, winner) {
+        function handleActionClick(dataset) {
+            const { action, value } = dataset;
+            if (action === 'progress') progressToNextPhase();
+            else if (action === 'play_again') startGame(true);
+            else if (action === 'challenge1') {
+                if (value === 'prophecy') {
+                    const content = `<div class="grid grid-cols-3 gap-2">${ELEMENTS.map(el => `<button class="action-btn bg-slate-600 hover:bg-slate-500 p-3 rounded-lg" data-action="c1_prophecy_select" data-value="${el}">${el}</button>`).join('')}</div>`;
+                    openModal('Choose an Element', content);
+                } else if (value === 'reveal') {
+                    const content = `<div class="grid grid-cols-2 gap-2">${gameState.players.filter(p=>p.id !== userId).map(p => `<button class="action-btn bg-slate-600 hover:bg-slate-500 p-3 rounded-lg" data-action="c1_reveal_select" data-value="${p.id}">${p.name}</button>`).join('')}</div>`;
+                    openModal('Choose a Player to Reveal', content);
+                }
+            }
+            else if (action === 'c1_prophecy_select') handleChallenge1Choice('prophecy', value);
+            else if (action === 'c1_reveal_select') handleChallenge1Choice('reveal', value);
+            else if (action === 'challenge2') handleChallenge2Choice(value);
+        }
+
+        function renderActionPanel(me) {
+            const isMyTurn = gameState.challengeWinnerId === me.id;
+            const winner = gameState.players.find(p => p.id === gameState.challengeWinnerId);
+
             if (isMyTurn) {
                 if (gameState.phase === GAME_PHASES.CHALLENGE_1) {
-                    return `<div class="text-center"><p class="text-lg text-yellow-300 mb-4">You won! Use your advantage.</p><button id="challenge1-choice-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-lg">Continue</button></div>`;
+                    return `<div class="text-center">
+                        <p class="text-lg text-yellow-300 mb-4">You won! Choose your advantage.</p>
+                        <div class="flex gap-4">
+                            <button class="action-btn flex-1 bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg" data-action="challenge1" data-value="prophecy">Prophecy</button>
+                            <button class="action-btn flex-1 bg-cyan-600 hover:bg-cyan-700 text-white font-bold py-2 px-4 rounded-lg" data-action="challenge1" data-value="reveal">Reveal</button>
+                        </div>
+                    </div>`;
                 }
                 if (gameState.phase === GAME_PHASES.CHALLENGE_2) {
-                    const potentialTargets = gameState.players.filter(p => p.id !== userId && !p.isEliminated);
-                    return `<div class="text-center w-full"><p class="text-lg text-yellow-300 mb-2">You won! Swap your Zodiac card.</p><div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2 overflow-y-auto max-h-24">${potentialTargets.map(p => `<button data-target-id="${p.id}" class="challenge2-choice-btn bg-slate-600 hover:bg-slate-500 text-white font-bold py-2 px-3 rounded-lg text-sm">${p.name}</button>`).join('')}</div></div>`;
+                    const content = `<div class="text-center w-full"><p class="text-lg text-yellow-300 mb-2">You won! Swap your Zodiac card.</p><div class="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-2 overflow-y-auto max-h-24">${gameState.players.filter(p => p.id !== userId && !p.isEliminated).map(p => `<button class="action-btn bg-slate-600 hover:bg-slate-500 p-2 rounded-lg" data-action="challenge2" data-value="${p.id}">${p.name}</button>`).join('')}</div></div>`;
+                    return content;
                 }
             }
 
-            if (gameState.challengeWinnerId && !isMyTurn) {
-                return `<p>Waiting for ${winner.name} to make a decision...</p>`;
-            }
+            if (gameState.challengeWinnerId && !isMyTurn) return `<p>Waiting for ${winner.name} to make a decision...</p>`;
             
-            if (isHost) {
+            if (me.isHost) {
                 const hostActions = {
-                    [GAME_PHASES.DEALING]: "Begin First Challenge",
-                    [GAME_PHASES.REVEAL_1]: "Begin Second Challenge",
-                    [GAME_PHASES.REVEAL_2]: "Reveal Final Card",
-                    [GAME_PHASES.REVEAL_3]: "Proceed to Showdown",
-                    [GAME_PHASES.SHOWDOWN]: "Proceed to Elimination",
-                    [GAME_PHASES.ELIMINATION]: "End Game",
+                    [GAME_PHASES.DEALING]: "Begin First Challenge", [GAME_PHASES.REVEAL_1]: "Begin Second Challenge",
+                    [GAME_PHASES.REVEAL_2]: "Reveal Final Card", [GAME_PHASES.REVEAL_3]: "Proceed to Showdown",
+                    [GAME_PHASES.SHOWDOWN]: "Proceed to Elimination", [GAME_PHASES.ELIMINATION]: "End Game",
                 };
                 if (hostActions[gameState.phase] && !gameState.challengeWinnerId) {
-                    return `<button id="progress-game-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-lg">${hostActions[gameState.phase]}</button>`;
+                    return `<button class="action-btn bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-6 rounded-lg" data-action="progress">${hostActions[gameState.phase]}</button>`;
                 }
                 if (gameState.phase === GAME_PHASES.GAME_OVER) {
-                    return `<button id="play-again-btn" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg">Play Again</button>`;
+                    return `<button class="action-btn bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-lg" data-action="play_again">Play Again</button>`;
                 }
             }
 
@@ -665,3 +568,4 @@
     </script>
 </body>
 </html>
+
